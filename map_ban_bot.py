@@ -896,4 +896,6 @@ if __name__ == "__main__":
     if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("Error: DISCORD_BOT_TOKEN not set. Put it in your .env file as DISCORD_BOT_TOKEN=YOUR_TOKEN")
     else:
+        print("Loaded token length:", len(TOKEN))
+        print("Token starts with (do NOT share this):", TOKEN[:10])
         bot.run(TOKEN)
