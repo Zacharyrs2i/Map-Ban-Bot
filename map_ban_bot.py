@@ -542,7 +542,79 @@ def strip_variant_from_text(text: str, variant: str | None):
 
 
 # --------------- COMMANDS ---------------
+@bot.command(name="mb_help")
+async def mb_help(ctx):
+    """
+    Show help for the HLL map-ban bot.
+    Usage: !mb_help
+    """
+    embed = discord.Embed(
+        title="HLL Map-Ban Help",
+        description=(
+            "This bot runs a per-side (Allies/Axis) map-ban for Hell Let Loose.\n"
+            "Bans are done by captains typing messages like `phl allies` or `1 axis`."
+        )
+    )
 
+    # Basic flow
+    embed.add_field(
+        name="Setup Flow",
+        value=(
+            "1. `!mb_new` – start a new map-ban session in this channel.\n"
+            "2. `!mb_teams @Captain1 @Captain2` – set the two captains.\n"
+            "3. `!mb_start` – coin flip for first ban and begin banning.\n"
+            "4. Captains ban by typing `<map> <side>` on their turn.\n"
+            "5. Bot auto-ends when only one playable map remains and assigns sides."
+        ),
+        inline=False,
+    )
+
+    # Ban syntax
+    embed.add_field(
+        name="How to Ban",
+        value=(
+            "**Always include a side**: `allies` / `axis` / `a` / `x`.\n"
+            "Examples:\n"
+            "• `1 allies` – ban Allies on map #1 in the bannable list.\n"
+            "• `phl axis` – ban Axis on PHL.\n"
+            "• `phl n axis` – ban Axis on **PHL Night**.\n"
+            "• `foy night a` – ban Allies on **Foy Night**.\n\n"
+            "You can use:\n"
+            "• **Numbers**: `1 allies`, `3 axis` (see numbered list in the embed).\n"
+            "• **Aliases**: `phl`, `sme`, `smdm`, `dri`, `foy`, etc.\n"
+            "• **Variants**: `night/n`, `dusk/d`, `dawn/da`, `overcast/o`."
+        ),
+        inline=False,
+    )
+
+    # What the embed shows
+    embed.add_field(
+        name="Reading the Status Embed",
+        value=(
+            "After each ban the bot shows:\n"
+            "• **Maps Still Available for Ban** – numbered list (you can use these numbers).\n"
+            "• **Playable Map Side Status** – for each map, what sides each team can still play.\n"
+            "• **Fully Banned Maps** – maps with no legal side assignments left.\n"
+            "• **Current Turn** – who should ban next and what format to use."
+        ),
+        inline=False,
+    )
+
+    # Admin / utility commands
+    embed.add_field(
+        name="Other Commands",
+        value=(
+            "`!mb_status` – show current status.\n"
+            "`!mb_pool` – show full map pool.\n"
+            "`!mb_undo` – undo last ban (session creator or admin).\n"
+            "`!mb_cancel` – cancel the session (session creator or admin).\n"
+            "`!mb_guilds` – list servers (bot owner only)."
+        ),
+        inline=False,
+    )
+
+    await ctx.send(embed=embed)
+    
 @bot.command(name="mb_new")
 async def mb_new(ctx):
     """
