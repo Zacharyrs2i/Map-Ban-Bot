@@ -1034,10 +1034,46 @@ async def on_message(message: discord.Message):
 
 # --------------- BOT STARTUP ---------------
 
-if __name__ == "__main__":
-    TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
-    if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("Error: DISCORD_BOT_TOKEN not set. Put it in your .env file as DISCORD_BOT_TOKEN=YOUR_TOKEN")
-    else:
-        bot.run(TOKEN)
+def main() -> None:
+    token = os.getenv("DISCORD_BOT_TOKEN")
+
+    token_length = len(token) if token else 0
+    token_present_after_dotenv = "DISCORD_BOT_TOKEN" in os.environ
+    token_added_by_dotenv = token_present_after_dotenv and not _token_present_before_dotenv
+    token_source = "dotenv" if token_added_by_dotenv else "pre-existing environment" if token_present_after_dotenv else "missing"
+
+    diagnostics = [
+        "Environment diagnostics:",
+        f"  .env path: {_dotenv_path if _dotenv_path else 'none'}",
+        f"  .env present in cwd: {_dotenv_present_in_cwd}",
+        f"  .env loaded: {_dotenv_loaded}",
+        f"  token present before load: {_token_present_before_dotenv}",
+        f"  token present after load: {token_present_after_dotenv}",
+        f"  token added by dotenv: {token_added_by_dotenv}",
+        f"  token source: {token_source}",
+        f"  token length: {token_length}",
+    ]
+
+    print("\n".join(diagnostics))
+
+    if token is None:
+        print(
+            "Error: DISCORD_BOT_TOKEN is missing. "
+            "Set it in your environment or in a .env file as DISCORD_BOT_TOKEN=YOUR_TOKEN."
+        )
+        raise SystemExit(1)
+
+    token = token.strip()
+    if not token or token.upper() == "YOUR_BOT_TOKEN_HERE":
+        print(
+            "Error: DISCORD_BOT_TOKEN is empty or still the placeholder. "
+            "Copy the exact Bot Token from the Discord developer portal."
+        )
+        raise SystemExit(1)
+
+    bot.run(token)
+
+
+if __name__ == "__main__":
+    main()
