@@ -378,11 +378,11 @@ class MapBanSession:
         """
         Apply a ban: member refuses to play 'side' on 'map_name'.
 
-        HLL rule we enforce:
-        - If Team A bans <side> on <map>, they refuse to play that side.
-        - Therefore Team A is locked to the opposite side on that map.
-        - The opponent is locked to the opposite side as well (since one team must be Allies and the other Axis).
-        - If this lock conflicts with previous bans, the map may become fully dead.
+        Updated rule we enforce:
+        - If a team bans <side> on <map>, they refuse to play that side.
+        - The opponent keeps their existing options; a map only becomes fully banned
+          once **both** teams have banned the same side and no legal assignment
+          remains.
 
         Returns (success: bool, msg: str)
         """
@@ -417,28 +417,10 @@ class MapBanSession:
         sides_set.remove(side)
         self.allowed_sides[team_id][map_name] = sides_set
 
-        # Opposite side for lock
-        opposite = "Axis" if side == "Allies" else "Allies"
-
-        # 2) Lock this team to the opposite side (if it wasn't already locked)
-        if opposite in self.allowed_sides[team_id][map_name]:
-            self.allowed_sides[team_id][map_name] = {opposite}
-        else:
-            # If they banned one side and do not even have the opposite available,
-            # this map is effectively unplayable for them.
-            self.allowed_sides[team_id][map_name] = set()
-
-        # 3) Lock the opponent to the opposite side as well (if still possible)
-        other_sides = self.allowed_sides.get(other_team_id, {}).get(map_name, set())
-        if other_sides:
-            # Opponent must play the opposite side of this team
-            locked_other = other_sides.intersection({opposite})
-            self.allowed_sides[other_team_id][map_name] = locked_other
-
         # Record ban in history
         self.ban_history.append({"map": map_name, "side": side, "by": member})
 
-        # 4) Recompute which maps are fully dead based on new side locks
+        # 2) Recompute which maps are fully dead based on new side locks
         self.recompute_fully_banned()
 
         return True, f"{member.display_name} banned **{map_name} – {side}**."
@@ -536,8 +518,22 @@ async def send_session_status(target, session: MapBanSession, title="Map Ban Sta
     # Maps still available for ban
     if session.status == "banning" and session.allowed_sides:
         bannable = session.maps_still_available_for_ban()
+
         if bannable:
-            numbered = [f"{i+1}) {name}" for i, name in enumerate(bannable)]
+            numbered = []
+            for i, name in enumerate(bannable):
+                if session.team1 and session.team2:
+                    t1_allowed = session.allowed_sides.get(session.team1.id, {}).get(name, set())
+                    t2_allowed = session.allowed_sides.get(session.team2.id, {}).get(name, set())
+                    t1_detail = format_side_detail(t1_allowed)
+                    t2_detail = format_side_detail(t2_allowed)
+                    numbered.append(
+                        f"{i+1}) {name}\n"
+                        f"  {session.team1.display_name}: {t1_detail}\n"
+                        f"  {session.team2.display_name}: {t2_detail}"
+                    )
+                else:
+                    numbered.append(f"{i+1}) {name}")
             value = "\n".join(numbered)
         else:
             value = "*(none)*"
