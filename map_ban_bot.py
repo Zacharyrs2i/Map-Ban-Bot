@@ -2,6 +2,7 @@ import os
 import random
 import discord
 from discord.ext import commands
+from dotenv import load_dotenv
 
 # Load environment variables from .env (DISCORD_BOT_TOKEN)
 load_dotenv()
