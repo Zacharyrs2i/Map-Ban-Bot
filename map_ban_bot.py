@@ -2,6 +2,10 @@ import os
 import random
 import discord
 from discord.ext import commands
+from dotenv import load_dotenv
+
+# Load environment variables from .env (DISCORD_BOT_TOKEN)
+load_dotenv()
 
 # --------------- CONFIG ---------------
 
@@ -9,8 +13,7 @@ BOT_PREFIX = "!"
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.guilds = True
-intents.members = True
+intents.guilds = True  # we don't need members or presence intents
 
 bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents)
 
@@ -57,9 +60,77 @@ MAP_POOL = [
     "Tobruk Dusk",
 ]
 
+# Short aliases / nicknames for easier map matching (family-level)
+ALIAS_MAP = {
+    # Purple Heart Lane
+    "phl": "PHL",
+    "purple": "PHL",
+    "purple heart": "PHL",
+    "purple heart lane": "PHL",
+
+    # Sainte-Mère-Église
+    "sme": "Sainte-Mère-Église",
+    "st mere": "Sainte-Mère-Église",
+    "st mere eglise": "Sainte-Mère-Église",
+
+    # Sainte-Marie-du-Mont
+    "smdm": "Sainte-Marie-du-Mont",
+    "stm": "Sainte-Marie-du-Mont",
+    "st marie": "Sainte-Marie-du-Mont",
+    "st marie du mont": "Sainte-Marie-du-Mont",
+
+    # Carentan
+    "car": "Carentan",
+
+    # Hill 400
+    "h400": "Hill 400",
+    "hill400": "Hill 400",
+
+    # Hurtgen Forest
+    "hurtgen": "Hurtgen Forest",
+
+    # El-Alamein
+    "elal": "El-Alamein",
+    "el al": "El-Alamein",
+
+    # Driel
+    "dri": "Driel",
+
+    # Foy
+    "foy": "Foy",
+
+    # Mortain
+    "mort": "Mortain",
+}
+
+# Variant keywords (shorthand for map variants)
+VARIANT_KEYWORDS = {
+    "night": "Night",
+    "n": "Night",
+    "dusk": "Dusk",
+    "d": "Dusk",
+    "dawn": "Dawn",
+    "da": "Dawn",
+    "overcast": "Overcast",
+    "o": "Overcast",
+}
+
 # One map-ban session per channel
 map_ban_sessions = {}  # {channel_id: MapBanSession}
 
+
+# --------------- BOT EVENTS ---------------
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    print("Connected to the following servers (guilds):")
+    for guild in bot.guilds:
+        print(f"- {guild.name} (ID: {guild.id})")
+    print(f"Total guilds: {len(bot.guilds)}")
+
+
+# --------------- CORE SESSION CLASS ---------------
 
 class MapBanSession:
     def __init__(self, channel_id, created_by, maps):
@@ -99,7 +170,7 @@ class MapBanSession:
             return None
         return self.team1 if member == self.team2 else self.team2
 
-    # ---------- Map / side logic ----------
+    # ---------- Map / side legality ----------
 
     def _legal_assignment(self, map_name: str, team1_side: str, team2_side: str) -> bool:
         """Check if this side pairing is legal for both teams on a map."""
@@ -147,28 +218,103 @@ class MapBanSession:
     def maps_still_available_for_ban(self):
         return [m for m in self.maps if self.map_available_for_ban(m)]
 
-    # ---------- Ban handling ----------
+    # ---------- Variant helpers ----------
 
-    def find_map_partial(self, text: str, only_bannable: bool = True):
+    @staticmethod
+    def _is_base_map_name(name: str) -> bool:
+        """Base map has no variant keyword in its name."""
+        variants = ["Night", "Dusk", "Dawn", "Overcast"]
+        return not any(v in name for v in variants)
+
+    @staticmethod
+    def _map_has_variant(name: str, variant: str | None) -> bool:
+        """Return True if map name matches the requested variant."""
+        if variant is None:
+            return True
+        return variant in name
+
+    # ---------- Ban searching / matching ----------
+
+    def find_map_partial(self, text: str, variant: str | None = None, only_bannable: bool = True):
         """
-        Case-insensitive partial map match.
-        If only_bannable is True, restrict to maps still available for ban.
+        Case-insensitive map match with:
+          - numeric index support (e.g. '1' = first bannable map)
+          - alias support (PHL, SME, SMDM, etc.)
+          - variant filtering (Night / Dusk / Dawn / Overcast)
+          - partial text search as fallback.
+
+        Returns:
+          - None if no matches
+          - map_name if exactly one match
+          - "AMBIGUOUS" if multiple matches
         """
         text = text.strip().lower()
         if not text:
             return None
 
+        # Candidates based on bannable state
         if only_bannable:
             candidates = [m for m in self.maps if self.map_available_for_ban(m)]
         else:
             candidates = self.maps[:]
 
-        matches = [m for m in candidates if text in m.lower()]
-        if len(matches) == 0:
+        if not candidates:
             return None
-        if len(matches) > 1:
-            return "AMBIGUOUS"
-        return matches[0]
+
+        # 1) Numeric index support: '1', '2', etc. (1-based)
+        if text.isdigit():
+            idx = int(text) - 1
+            if 0 <= idx < len(candidates):
+                return candidates[idx]
+            return None
+
+        # 2) Alias support
+        if text in ALIAS_MAP:
+            alias_target = ALIAS_MAP[text].lower()
+            alias_matches = [
+                m for m in candidates
+                if alias_target in m.lower() and self._map_has_variant(m, variant)
+            ]
+            if len(alias_matches) == 1:
+                return alias_matches[0]
+            if len(alias_matches) > 1:
+                # Try to prefer base maps if variant not specified
+                if variant is None:
+                    base_matches = [m for m in alias_matches if self._is_base_map_name(m)]
+                    if len(base_matches) == 1:
+                        return base_matches[0]
+                return "AMBIGUOUS"
+
+        # 3) Partial text search (with variant filtering)
+        matches = [
+            m for m in candidates
+            if text in m.lower() and self._map_has_variant(m, variant)
+        ]
+
+        if len(matches) == 0:
+            # If variant was specified and got no matches, try without variant as fallback
+            if variant is not None:
+                matches = [m for m in candidates if text in m.lower()]
+                if not matches:
+                    return None
+            else:
+                return None
+
+        if len(matches) == 1:
+            return matches[0]
+
+        # If multiple matches and no variant specified, prefer base maps
+        if variant is None:
+            base_matches = [m for m in matches if self._is_base_map_name(m)]
+            if len(base_matches) == 1:
+                return base_matches[0]
+            if len(base_matches) > 1:
+                return "AMBIGUOUS"
+
+        # Still ambiguous
+        return "AMBIGUOUS"
+
+    # ---------- Ban handling ----------
 
     def register_ban(self, member: discord.Member, map_name: str, side: str):
         """
@@ -224,7 +370,6 @@ class MapBanSession:
             options.append(("Axis", "Allies"))
 
         if not options:
-            # Shouldn't happen if playable_maps is correct, but just in case
             return final_map, None, None
 
         t1_side, t2_side = random.choice(options)
@@ -252,9 +397,15 @@ async def send_session_status(ctx, session: MapBanSession, title="Map Ban Status
     # Maps still available for ban
     if session.status == "banning" and session.allowed_sides:
         bannable = session.maps_still_available_for_ban()
+        if bannable:
+            numbered = [f"{i+1}) {name}" for i, name in enumerate(bannable)]
+            value = "\n".join(numbered)
+        else:
+            value = "*(none)*"
+
         embed.add_field(
             name=f"Maps Still Available for Ban ({len(bannable)})",
-            value=format_list_as_bullets(bannable),
+            value=value,
             inline=False,
         )
     else:
@@ -264,14 +415,14 @@ async def send_session_status(ctx, session: MapBanSession, title="Map Ban Status
             inline=False,
         )
 
-    # Per-map side status (only once banning has started)
+    # Per-map side status (once banning has started)
     if session.status in ("banning", "finished") and session.allowed_sides and session.team1 and session.team2:
         lines = []
         t1_id = session.team1.id
         t2_id = session.team2.id
         for m in session.maps:
             if m in session.fully_banned_maps:
-                continue  # show in separate section
+                continue
             if not session.is_map_playable(m):
                 continue
             t1_sides = session.allowed_sides.get(t1_id, {}).get(m, set())
@@ -308,8 +459,10 @@ async def send_session_status(ctx, session: MapBanSession, title="Map Ban Status
     if session.status == "banning" and session.current_turn:
         embed.add_field(
             name="Current Turn",
-            value=f"{session.current_turn.mention} – type `<map> <side>` "
-                  f"(e.g. `foy allies`, `remagen axis`).",
+            value=(
+                f"{session.current_turn.mention} – type `<map> <side>` "
+                f"(you can use number, alias, and variant, e.g. `1 allies`, `phl n axis`)."
+            ),
             inline=False,
         )
 
@@ -334,11 +487,13 @@ def parse_side(text: str):
     return side
 
 
-def strip_side_from_text(text: str, side: str):
+def strip_side_from_text(text: str, side: str | None):
     """
-    Remove side word(s) from text so we can match map.
-    Very simple: drops tokens recognized as that side.
+    Remove side word(s) from text so we can match map/variant.
     """
+    if side is None:
+        return text.strip()
+
     tokens = text.split()
     side_tokens_allies = {"allies", "ally", "a"}
     side_tokens_axis = {"axis", "x"}
@@ -349,6 +504,38 @@ def strip_side_from_text(text: str, side: str):
         if side == "Allies" and low in side_tokens_allies:
             continue
         if side == "Axis" and low in side_tokens_axis:
+            continue
+        cleaned.append(tok)
+    return " ".join(cleaned).strip()
+
+
+def parse_variant(text: str):
+    """
+    Try to extract a variant (Night/Dusk/Dawn/Overcast) from text.
+    Returns variant string or None.
+    """
+    tokens = text.lower().split()
+    for tok in tokens:
+        if tok in VARIANT_KEYWORDS:
+            return VARIANT_KEYWORDS[tok]
+    return None
+
+
+def strip_variant_from_text(text: str, variant: str | None):
+    """
+    Remove variant tokens from text (e.g. 'night', 'n', 'dusk', etc.).
+    """
+    if variant is None:
+        return text.strip()
+
+    tokens = text.split()
+    # Collect all tokens that map to this variant
+    variant_tokens = {tok for tok, var in VARIANT_KEYWORDS.items() if var == variant}
+
+    cleaned = []
+    for tok in tokens:
+        low = tok.lower()
+        if low in variant_tokens:
             continue
         cleaned.append(tok)
     return " ".join(cleaned).strip()
@@ -374,7 +561,9 @@ async def mb_new(ctx):
         f"Using standard map pool ({len(MAP_POOL)} maps)."
     )
     await send_session_status(ctx, session, title="Map Ban Session Created")
-    await ctx.send("Now set captains with: `!mb_teams @Captain1 @Captain2`")
+    await ctx.send(
+        "Now set captains with: `!mb_teams @Captain1 @Captain2`"
+    )
 
 
 @bot.command(name="mb_pool")
@@ -419,7 +608,6 @@ async def mb_teams(ctx, team1: discord.Member, team2: discord.Member):
         f"✅ Captains set: {team1.mention} vs {team2.mention}\n"
         f"Start banning with `!mb_start`."
     )
-    ctx = await bot.get_context(ctx.message)
     await send_session_status(ctx, session, title="Captains Set")
 
 
@@ -450,7 +638,8 @@ async def mb_start(ctx):
 
     await ctx.send(
         f"🎲 Coin flip! {session.current_turn.mention} bans **first**.\n"
-        f"Type `<map> <side>` (e.g. `foy allies`, `driel axis`)."
+        f"Type `<map> <side>` – you can use number, alias, and variant, e.g.:\n"
+        f"`1 allies`, `phl axis`, `phl n axis`, `foy night a`."
     )
     await send_session_status(ctx, session, title="Map Ban Started")
 
@@ -521,8 +710,18 @@ async def mb_undo(ctx):
     session.recompute_fully_banned()
 
     await ctx.send(f"↩️ Undo: restored **{side}** on **{map_name}** for {member.mention}.")
-    ctx2 = await bot.get_context(ctx.message)
-    await send_session_status(ctx2, session, title="Map Ban Updated (Undo)")
+    await send_session_status(ctx, session, title="Map Ban Updated (Undo)")
+
+
+@bot.command(name="mb_guilds")
+@commands.is_owner()
+async def mb_guilds(ctx):
+    """List the servers this bot is in (owner-only)."""
+    lines = [f"- {g.name} (ID: {g.id})" for g in bot.guilds]
+    text = "\n".join(lines) if lines else "I'm not in any servers somehow."
+    await ctx.send(
+        f"I'm currently in **{len(bot.guilds)}** servers:\n{text}"
+    )
 
 
 # --------------- MESSAGE HANDLER (FREE-TEXT BANS) ---------------
@@ -547,18 +746,25 @@ async def on_message(message: discord.Message):
                 if not side:
                     await message.channel.send(
                         f"{message.author.mention} please include a side: "
-                        f"`allies` or `axis`. Example: `foy allies`."
+                        f"`allies` or `axis`. Example: `1 allies`, `phl n axis`."
                     )
                 else:
-                    # Strip side words and match map from remaining text
-                    map_text = strip_side_from_text(content, side)
-                    if not map_text:
+                    # Strip side and parse variant
+                    text_no_side = strip_side_from_text(content, side)
+                    variant = parse_variant(text_no_side)
+                    text_no_side_variant = strip_variant_from_text(text_no_side, variant)
+
+                    if not text_no_side_variant:
                         await message.channel.send(
                             f"{message.author.mention} I couldn't see a map name. "
-                            f"Use `<map> <side>`, e.g. `driel allies`."
+                            f"Use `<map> <side>`, e.g. `1 allies`, `phl axis`, `phl night axis`."
                         )
                     else:
-                        chosen_map = session.find_map_partial(map_text, only_bannable=True)
+                        chosen_map = session.find_map_partial(
+                            text_no_side_variant,
+                            variant=variant,
+                            only_bannable=True,
+                        )
                         if chosen_map is None:
                             await message.channel.send(
                                 f"{message.author.mention} I couldn't match that to any map still available for ban. "
@@ -567,7 +773,7 @@ async def on_message(message: discord.Message):
                         elif chosen_map == "AMBIGUOUS":
                             await message.channel.send(
                                 f"{message.author.mention} that text matches **multiple** maps. "
-                                f"Please be more specific."
+                                f"Please be more specific or use the number shown in the list (e.g. `1 allies`)."
                             )
                         else:
                             # Apply ban
@@ -593,8 +799,7 @@ async def on_message(message: discord.Message):
                                             f"{session.team1.display_name}: **{t1_side}**\n"
                                             f"{session.team2.display_name}: **{t2_side}**"
                                         )
-                                    ctx = await bot.get_context(message)
-                                    await send_session_status(ctx, session, title="Final Map-Ban Result")
+                                    await send_session_status(message.channel, session, title="Final Map-Ban Result")
                                     await bot.process_commands(message)
                                     return
                                 else:
@@ -602,10 +807,9 @@ async def on_message(message: discord.Message):
                                     session.current_turn = session.other_captain(message.author)
                                     await message.channel.send(
                                         f"Next ban: {session.current_turn.mention} – "
-                                        f"type `<map> <side>` (e.g. `remagen axis`)."
+                                        f"type `<map> <side>` (e.g. `2 axis`, `phl a`, `phl n axis`)."
                                     )
-                                    ctx = await bot.get_context(message)
-                                    await send_session_status(ctx, session, title="Map Ban Updated")
+                                    await send_session_status(message.channel, session, title="Map Ban Updated")
 
     # Let normal commands run
     await bot.process_commands(message)
@@ -614,10 +818,9 @@ async def on_message(message: discord.Message):
 # --------------- BOT STARTUP ---------------
 
 if __name__ == "__main__":
-    # Put your bot token here or use environment variable DISCORD_BOT_TOKEN
-    TOKEN = os.getenv("DISCORD_BOT_TOKEN") or "YOUR_BOT_TOKEN_HERE"
+    TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
-    if TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("Error: set your Discord bot token in DISCORD_BOT_TOKEN env var or in the script.")
+    if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("Error: DISCORD_BOT_TOKEN not set. Put it in your .env file as DISCORD_BOT_TOKEN=YOUR_TOKEN")
     else:
         bot.run(TOKEN)
