@@ -378,11 +378,11 @@ class MapBanSession:
         """
         Apply a ban: member refuses to play 'side' on 'map_name'.
 
-        HLL rule we enforce:
-        - If Team A bans <side> on <map>, they refuse to play that side.
-        - Therefore Team A is locked to the opposite side on that map.
-        - The opponent is locked to the opposite side as well (since one team must be Allies and the other Axis).
-        - If this lock conflicts with previous bans, the map may become fully dead.
+       Updated rule we enforce:
+        - If a team bans <side> on <map>, they refuse to play that side.
+        - The opponent keeps their existing options; a map only becomes fully banned
+          once **both** teams have banned the same side and no legal assignment
+          remains.
 
         Returns (success: bool, msg: str)
         """
@@ -417,28 +417,11 @@ class MapBanSession:
         sides_set.remove(side)
         self.allowed_sides[team_id][map_name] = sides_set
 
-        # Opposite side for lock
-        opposite = "Axis" if side == "Allies" else "Allies"
-
-        # 2) Lock this team to the opposite side (if it wasn't already locked)
-        if opposite in self.allowed_sides[team_id][map_name]:
-            self.allowed_sides[team_id][map_name] = {opposite}
-        else:
-            # If they banned one side and do not even have the opposite available,
-            # this map is effectively unplayable for them.
-            self.allowed_sides[team_id][map_name] = set()
-
-        # 3) Lock the opponent to the opposite side as well (if still possible)
-        other_sides = self.allowed_sides.get(other_team_id, {}).get(map_name, set())
-        if other_sides:
-            # Opponent must play the opposite side of this team
-            locked_other = other_sides.intersection({opposite})
-            self.allowed_sides[other_team_id][map_name] = locked_other
 
         # Record ban in history
         self.ban_history.append({"map": map_name, "side": side, "by": member})
 
-        # 4) Recompute which maps are fully dead based on new side locks
+        # 2) Recompute which maps are fully dead based on new side locks
         self.recompute_fully_banned()
 
         return True, f"{member.display_name} banned **{map_name} – {side}**."
