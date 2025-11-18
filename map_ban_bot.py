@@ -537,10 +537,20 @@ async def send_session_status(target, session: MapBanSession, title="Map Ban Sta
     if session.status == "banning" and session.allowed_sides:
         bannable = session.maps_still_available_for_ban()
         if bannable:
-            numbered = [f"{i+1}) {name}" for i, name in enumerate(bannable)]
-            value = "\n".join(numbered)
-        else:
-            value = "*(none)*"
+            numbered = []
+            for i, name in enumerate(bannable):
+                if session.team1 and session.team2:
+                    t1_allowed = session.allowed_sides.get(session.team1.id, {}).get(name, set())
+                    t2_allowed = session.allowed_sides.get(session.team2.id, {}).get(name, set())
+                    t1_detail = format_side_detail(t1_allowed)
+                    t2_detail = format_side_detail(t2_allowed)
+                    numbered.append(
+                        f"{i+1}) {name}\n"
+                        f"  {session.team1.display_name}: {t1_detail}\n"
+                        f"  {session.team2.display_name}: {t2_detail}"
+                    )
+                else:
+                    numbered.append(f"{i+1}) {name}")
 
         embed.add_field(
             name=f"Maps Still Available for Ban ({len(bannable)})",
