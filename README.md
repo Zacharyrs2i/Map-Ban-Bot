@@ -45,3 +45,18 @@ Show the help menu and usage instructions.
 !mb_guilds (bot owner only)
 
 List the servers the bot is currently in.
+
+
+#If you run into issues with Discord_Bot_Token use the following codes
+
+# See what’s currently set
+echo "$DISCORD_BOT_TOKEN"
+
+# Clear it
+unset DISCORD_BOT_TOKEN
+
+# Optional: confirm it’s gone (should print a blank line)
+echo "$DISCORD_BOT_TOKEN"
+
+# Now run your bot
+python map_ban_bot.py

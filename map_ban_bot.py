@@ -2,10 +2,68 @@ import os
 import random
 import discord
 from discord.ext import commands
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 # Load environment variables from .env (DISCORD_BOT_TOKEN)
-load_dotenv()
+import os
+from dotenv import load_dotenv, find_dotenv
+
+# --- ENV / TOKEN DEBUG SECTION ---
+
+# Was the token already in the environment before we touched .env?
+_token_present_before_dotenv = "DISCORD_BOT_TOKEN" in os.environ
+
+# Which .env file will python-dotenv find (if any)?
+_dotenv_path = find_dotenv(usecwd=True)
+_dotenv_present_in_cwd = bool(_dotenv_path)
+
+print("=== ENV DEBUG START ===")
+print(f".env detected: {_dotenv_path if _dotenv_present_in_cwd else 'None found'}")
+print(f"Token present before load_dotenv: {_token_present_before_dotenv}")
+
+# Load .env (if path exists), otherwise let load_dotenv search default
+_dotenv_loaded = load_dotenv(_dotenv_path or None)
+print(f".env loaded: {_dotenv_loaded}")
+
+_token_after = os.getenv("DISCORD_BOT_TOKEN")
+
+if _token_after:
+    masked = f"{_token_after[:4]}...{_token_after[-4:]}" if len(_token_after) > 8 else "too short to mask"
+    print(f"DISCORD_BOT_TOKEN is SET (len={len(_token_after)}), value: {masked}")
+
+    if _token_present_before_dotenv:
+        print("Source guess: existing process environment (NOT from .env).")
+    elif _dotenv_loaded and _dotenv_present_in_cwd:
+        print(f"Source guess: .env file at: {_dotenv_path}")
+    else:
+        print("Source guess: unknown (could be system/user env, service config, etc.).")
+else:
+    print("DISCORD_BOT_TOKEN is NOT set after load_dotenv.")
+    if not _dotenv_loaded:
+        print("Warning: .env file not found or not loaded.")
+print("=== ENV DEBUG END ===")
+
+
+def reset_and_reload_token(dotenv_path=None):
+    """
+    Clear DISCORD_BOT_TOKEN from the current process env,
+    then reload from the specified .env file (or auto-detected one).
+    Call this BEFORE you call os.getenv('DISCORD_BOT_TOKEN') for real.
+    """
+    if "DISCORD_BOT_TOKEN" in os.environ:
+        del os.environ["DISCORD_BOT_TOKEN"]
+        print("Cleared DISCORD_BOT_TOKEN from process environment.")
+    else:
+        print("No DISCORD_BOT_TOKEN in process environment to clear.")
+
+    # Reload from .env
+    env_path = dotenv_path or find_dotenv(usecwd=True)
+    if env_path:
+        print(f"Reloading DISCORD_BOT_TOKEN from .env: {env_path}")
+        load_dotenv(env_path, override=True)
+    else:
+        print("No .env file found to reload from.")
+# --- END ENV / TOKEN DEBUG SECTION ---
 
 # --------------- CONFIG ---------------
 
