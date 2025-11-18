@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 # Load environment variables from .env (DISCORD_BOT_TOKEN)
 load_dotenv()
 
-
 # --------------- CONFIG ---------------
 
 BOT_PREFIX = "!"
@@ -228,7 +227,7 @@ class MapBanSession:
         return not any(v in name for v in variants)
 
     @staticmethod
-    def _map_has_variant(name: str, variant: str | None) -> bool:
+    def _map_has_variant(name: str, variant):
         """Return True if map name matches the requested variant."""
         if variant is None:
             return True
@@ -236,7 +235,7 @@ class MapBanSession:
 
     # ---------- Ban searching / matching ----------
 
-    def find_map_partial(self, text: str, variant: str | None = None, only_bannable: bool = True):
+    def find_map_partial(self, text: str, variant=None, only_bannable: bool = True):
         """
         Case-insensitive map match with:
           - numeric index support (e.g. '1' = first bannable map)
@@ -315,20 +314,41 @@ class MapBanSession:
         # Still ambiguous
         return "AMBIGUOUS"
 
-    # ---------- Ban handling ----------
+    # ---------- Ban handling with side-lock rule ----------
 
     def register_ban(self, member: discord.Member, map_name: str, side: str):
         """
         Apply a ban: member refuses to play 'side' on 'map_name'.
+
+        HLL rule we enforce:
+        - If Team A bans <side> on <map>, they refuse to play that side.
+        - Therefore Team A is locked to the opposite side on that map.
+        - The opponent is locked to the opposite side as well (since one team must be Allies and the other Axis).
+        - If this lock conflicts with previous bans, the map may become fully dead.
+
         Returns (success: bool, msg: str)
         """
         if not self.allowed_sides:
             return False, "Internal error: allowed sides not initialized."
 
+        if not (self.team1 and self.team2):
+            return False, "Teams are not set for this session."
+
         team_id = member.id
         if team_id not in self.allowed_sides:
             return False, "You are not one of the captains for this session."
 
+        # Current team and opponent
+        if member == self.team1:
+            other_team = self.team2
+        elif member == self.team2:
+            other_team = self.team1
+        else:
+            return False, "You are not one of the captains for this session."
+
+        other_team_id = other_team.id
+
+        # 1) Remove the banned side from this team's allowed set
         sides_set = self.allowed_sides[team_id].get(map_name, set())
         if side not in sides_set:
             if not sides_set:
@@ -336,13 +356,33 @@ class MapBanSession:
             else:
                 return False, f"You have already banned **{side}** on **{map_name}**."
 
-        # Remove the side for this team on that map
         sides_set.remove(side)
         self.allowed_sides[team_id][map_name] = sides_set
+
+        # Opposite side for lock
+        opposite = "Axis" if side == "Allies" else "Allies"
+
+        # 2) Lock this team to the opposite side (if it wasn't already locked)
+        if opposite in self.allowed_sides[team_id][map_name]:
+            self.allowed_sides[team_id][map_name] = {opposite}
+        else:
+            # If they banned one side and do not even have the opposite available,
+            # this map is effectively unplayable for them.
+            self.allowed_sides[team_id][map_name] = set()
+
+        # 3) Lock the opponent to the opposite side as well (if still possible)
+        other_sides = self.allowed_sides.get(other_team_id, {}).get(map_name, set())
+        if other_sides:
+            # Opponent must play the opposite side of this team
+            locked_other = other_sides.intersection({opposite})
+            self.allowed_sides[other_team_id][map_name] = locked_other
+
+        # Record ban in history
         self.ban_history.append({"map": map_name, "side": side, "by": member})
 
-        # Recompute which maps are fully dead
+        # 4) Recompute which maps are fully dead based on new side locks
         self.recompute_fully_banned()
+
         return True, f"{member.display_name} banned **{map_name} – {side}**."
 
     def playable_maps(self):
@@ -385,7 +425,47 @@ def format_list_as_bullets(items):
     return "\n".join(f"- {i}" for i in items)
 
 
-async def send_session_status(ctx, session: MapBanSession, title="Map Ban Status"):
+def format_side_detail(allowed_set=None):
+    """
+    Show per-team side status with both sides visible.
+    Example outputs:
+    - "A: ✅  X: ✅"
+    - "A: ❌  X: ✅"
+    - "A: ❌  X: ❌"
+    """
+    if allowed_set is None:
+        allowed_set = set()
+    base_sides = ["Allies", "Axis"]
+    parts = []
+    for side_name, short in (("Allies", "A"), ("Axis", "X")):
+        emoji = "✅" if side_name in allowed_set else "❌"
+        parts.append(f"{short}: {emoji}")
+    return "  ".join(parts)
+
+
+def format_lock_text(allowed_set=None):
+    """
+    Return a human-readable lock description:
+    - 'Allies/Axis'  -> fully open
+    - 'Allies only'  -> locked to Allies
+    - 'Axis only'    -> locked to Axis
+    - 'No sides'     -> cannot play this map
+    """
+    if allowed_set is None:
+        allowed_set = set()
+
+    if not allowed_set:
+        return "No sides"
+    if allowed_set == {"Allies", "Axis"}:
+        return "Allies/Axis"
+    if allowed_set == {"Allies"}:
+        return "Allies only"
+    if allowed_set == {"Axis"}:
+        return "Axis only"
+    return "/".join(sorted(allowed_set))
+
+
+async def send_session_status(target, session: MapBanSession, title="Map Ban Status"):
     embed = discord.Embed(title=title)
 
     team1_name = session.team1.display_name if session.team1 else "Not set"
@@ -426,26 +506,53 @@ async def send_session_status(ctx, session: MapBanSession, title="Map Ban Status
                 continue
             if not session.is_map_playable(m):
                 continue
-            t1_sides = session.allowed_sides.get(t1_id, {}).get(m, set())
-            t2_sides = session.allowed_sides.get(t2_id, {}).get(m, set())
 
-            def fmt_sides(s):
-                if not s:
-                    return "None"
-                if s == {"Allies", "Axis"}:
-                    return "Allies/Axis"
-                return "/".join(sorted(s))
+            t1_allowed = session.allowed_sides.get(t1_id, {}).get(m, set())
+            t2_allowed = session.allowed_sides.get(t2_id, {}).get(m, set())
+
+            t1_detail = format_side_detail(t1_allowed)
+            t2_detail = format_side_detail(t2_allowed)
 
             lines.append(
-                f"{m} – {session.team1.display_name}: {fmt_sides(t1_sides)} | "
-                f"{session.team2.display_name}: {fmt_sides(t2_sides)}"
+                f"{m}\n"
+                f"  {session.team1.display_name}: {t1_detail}\n"
+                f"  {session.team2.display_name}: {t2_detail}"
             )
 
         embed.add_field(
-            name="Playable Map Side Status",
+            name="Playable Map Side Status (A = Allies, X = Axis)",
             value="\n".join(lines) if lines else "*(none)*",
             inline=False,
         )
+
+        # Side lock summary section (maps where either team is restricted)
+        lock_lines = []
+        for m in session.maps:
+            if m in session.fully_banned_maps:
+                continue
+            if not session.is_map_playable(m):
+                continue
+
+            t1_allowed = session.allowed_sides.get(t1_id, {}).get(m, set())
+            t2_allowed = session.allowed_sides.get(t2_id, {}).get(m, set())
+
+            t1_lock = format_lock_text(t1_allowed)
+            t2_lock = format_lock_text(t2_allowed)
+
+            # Only show maps where at least one team isn't fully open
+            if t1_lock != "Allies/Axis" or t2_lock != "Allies/Axis":
+                lock_lines.append(
+                    f"{m}\n"
+                    f"  {session.team1.display_name}: {t1_lock}\n"
+                    f"  {session.team2.display_name}: {t2_lock}"
+                )
+
+        if lock_lines:
+            embed.add_field(
+                name="Side Locks (maps with side restrictions)",
+                value="\n".join(lock_lines),
+                inline=False,
+            )
 
         # Fully banned maps
         dead = sorted(list(session.fully_banned_maps))
@@ -467,7 +574,7 @@ async def send_session_status(ctx, session: MapBanSession, title="Map Ban Status
             inline=False,
         )
 
-    await ctx.send(embed=embed)
+    await target.send(embed=embed)
 
 
 def parse_side(text: str):
@@ -488,7 +595,7 @@ def parse_side(text: str):
     return side
 
 
-def strip_side_from_text(text: str, side: str | None):
+def strip_side_from_text(text: str, side):
     """
     Remove side word(s) from text so we can match map/variant.
     """
@@ -522,7 +629,7 @@ def parse_variant(text: str):
     return None
 
 
-def strip_variant_from_text(text: str, variant: str | None):
+def strip_variant_from_text(text: str, variant):
     """
     Remove variant tokens from text (e.g. 'night', 'n', 'dusk', etc.).
     """
@@ -543,79 +650,7 @@ def strip_variant_from_text(text: str, variant: str | None):
 
 
 # --------------- COMMANDS ---------------
-@bot.command(name="mb_help")
-async def mb_help(ctx):
-    """
-    Show help for the HLL map-ban bot.
-    Usage: !mb_help
-    """
-    embed = discord.Embed(
-        title="HLL Map-Ban Help",
-        description=(
-            "This bot runs a per-side (Allies/Axis) map-ban for Hell Let Loose.\n"
-            "Bans are done by captains typing messages like `phl allies` or `1 axis`."
-        )
-    )
 
-    # Basic flow
-    embed.add_field(
-        name="Setup Flow",
-        value=(
-            "1. `!mb_new` – start a new map-ban session in this channel.\n"
-            "2. `!mb_teams @Captain1 @Captain2` – set the two captains.\n"
-            "3. `!mb_start` – coin flip for first ban and begin banning.\n"
-            "4. Captains ban by typing `<map> <side>` on their turn.\n"
-            "5. Bot auto-ends when only one playable map remains and assigns sides."
-        ),
-        inline=False,
-    )
-
-    # Ban syntax
-    embed.add_field(
-        name="How to Ban",
-        value=(
-            "**Always include a side**: `allies` / `axis` / `a` / `x`.\n"
-            "Examples:\n"
-            "• `1 allies` – ban Allies on map #1 in the bannable list.\n"
-            "• `phl axis` – ban Axis on PHL.\n"
-            "• `phl n axis` – ban Axis on **PHL Night**.\n"
-            "• `foy night a` – ban Allies on **Foy Night**.\n\n"
-            "You can use:\n"
-            "• **Numbers**: `1 allies`, `3 axis` (see numbered list in the embed).\n"
-            "• **Aliases**: `phl`, `sme`, `smdm`, `dri`, `foy`, etc.\n"
-            "• **Variants**: `night/n`, `dusk/d`, `dawn/da`, `overcast/o`."
-        ),
-        inline=False,
-    )
-
-    # What the embed shows
-    embed.add_field(
-        name="Reading the Status Embed",
-        value=(
-            "After each ban the bot shows:\n"
-            "• **Maps Still Available for Ban** – numbered list (you can use these numbers).\n"
-            "• **Playable Map Side Status** – for each map, what sides each team can still play.\n"
-            "• **Fully Banned Maps** – maps with no legal side assignments left.\n"
-            "• **Current Turn** – who should ban next and what format to use."
-        ),
-        inline=False,
-    )
-
-    # Admin / utility commands
-    embed.add_field(
-        name="Other Commands",
-        value=(
-            "`!mb_status` – show current status.\n"
-            "`!mb_pool` – show full map pool.\n"
-            "`!mb_undo` – undo last ban (session creator or admin).\n"
-            "`!mb_cancel` – cancel the session (session creator or admin).\n"
-            "`!mb_guilds` – list servers (bot owner only)."
-        ),
-        inline=False,
-    )
-
-    await ctx.send(embed=embed)
-    
 @bot.command(name="mb_new")
 async def mb_new(ctx):
     """
@@ -797,6 +832,81 @@ async def mb_guilds(ctx):
     )
 
 
+@bot.command(name="mb_help")
+async def mb_help(ctx):
+    """
+    Show help for the HLL map-ban bot.
+    Usage: !mb_help
+    """
+    embed = discord.Embed(
+        title="HLL Map-Ban Help",
+        description=(
+            "This bot runs a per-side (Allies/Axis) map-ban for Hell Let Loose.\n"
+            "Bans are done by captains typing messages like `phl allies` or `1 axis`."
+        )
+    )
+
+    # Basic flow
+    embed.add_field(
+        name="Setup Flow",
+        value=(
+            "1. `!mb_new` – start a new map-ban session in this channel.\n"
+            "2. `!mb_teams @Captain1 @Captain2` – set the two captains.\n"
+            "3. `!mb_start` – coin flip for first ban and begin banning.\n"
+            "4. Captains ban by typing `<map> <side>` on their turn.\n"
+            "5. Bot auto-ends when only one playable map remains and assigns sides."
+        ),
+        inline=False,
+    )
+
+    # Ban syntax
+    embed.add_field(
+        name="How to Ban",
+        value=(
+            "**Always include a side**: `allies` / `axis` / `a` / `x`.\n"
+            "Examples:\n"
+            "• `1 allies` – ban Allies on map #1 in the bannable list.\n"
+            "• `phl axis` – ban Axis on PHL.\n"
+            "• `phl n axis` – ban Axis on **PHL Night**.\n"
+            "• `foy night a` – ban Allies on **Foy Night**.\n\n"
+            "You can use:\n"
+            "• **Numbers**: `1 allies`, `3 axis` (see numbered list in the embed).\n"
+            "• **Aliases**: `phl`, `sme`, `smdm`, `dri`, `foy`, etc.\n"
+            "• **Variants**: `night/n`, `dusk/d`, `dawn/da`, `overcast/o`."
+        ),
+        inline=False,
+    )
+
+    # What the embed shows
+    embed.add_field(
+        name="Reading the Status Embed",
+        value=(
+            "After each ban the bot shows:\n"
+            "• **Maps Still Available for Ban** – numbered list (you can use these numbers).\n"
+            "• **Playable Map Side Status** – A/X grid with ✅/❌ per team.\n"
+            "• **Side Locks** – maps where either team is locked to a specific side.\n"
+            "• **Fully Banned Maps** – maps with no legal side assignments left.\n"
+            "• **Current Turn** – who should ban next and what format to use."
+        ),
+        inline=False,
+    )
+
+    # Other commands
+    embed.add_field(
+        name="Other Commands",
+        value=(
+            "`!mb_status` – show current status.\n"
+            "`!mb_pool` – show full map pool.\n"
+            "`!mb_undo` – undo last ban (session creator or admin).\n"
+            "`!mb_cancel` – cancel the session (session creator or admin).\n"
+            "`!mb_guilds` – list servers (bot owner only)."
+        ),
+        inline=False,
+    )
+
+    await ctx.send(embed=embed)
+
+
 # --------------- MESSAGE HANDLER (FREE-TEXT BANS) ---------------
 
 @bot.event
@@ -846,7 +956,8 @@ async def on_message(message: discord.Message):
                         elif chosen_map == "AMBIGUOUS":
                             await message.channel.send(
                                 f"{message.author.mention} that text matches **multiple** maps. "
-                                f"Please be more specific or use the number shown in the list (e.g. `1 allies`)."
+                                f"Please be more specific or use the number shown in the list "
+                                f"(e.g. `1 allies`)."
                             )
                         else:
                             # Apply ban
@@ -854,9 +965,41 @@ async def on_message(message: discord.Message):
                             if not success:
                                 await message.channel.send(f"{message.author.mention} {msg}")
                             else:
+                                # Normal ban message
                                 await message.channel.send(f"🚫 {msg}")
 
-                                # Check if finished
+                                # Lock info message
+                                team1 = session.team1
+                                team2 = session.team2
+                                t1_allowed = session.allowed_sides.get(team1.id, {}).get(chosen_map, set())
+                                t2_allowed = session.allowed_sides.get(team2.id, {}).get(chosen_map, set())
+
+                                def lock_text(team, allowed):
+                                    if not allowed:
+                                        return f"{team.display_name} can no longer play **ANY** side on this map."
+                                    if allowed == {"Allies"}:
+                                        return f"{team.display_name} is now **locked to Allies** on **{chosen_map}**."
+                                    if allowed == {"Axis"}:
+                                        return f"{team.display_name} is now **locked to Axis** on **{chosen_map}**."
+                                    return f"{team.display_name} can still play Allies or Axis on **{chosen_map}**."
+
+                                t1_msg = lock_text(team1, t1_allowed)
+                                t2_msg = lock_text(team2, t2_allowed)
+
+                                await message.channel.send(
+                                    f"🔒 **Side Locks Updated for {chosen_map}:**\n"
+                                    f"- {t1_msg}\n"
+                                    f"- {t2_msg}"
+                                )
+
+                                # If the map became fully banned, announce it
+                                if chosen_map in session.fully_banned_maps:
+                                    await message.channel.send(
+                                        f"❌ **{chosen_map} is now FULLY BANNED** "
+                                        f"(no legal side assignment remains)."
+                                    )
+
+                                # Check finish condition
                                 if session.is_finished():
                                     session.status = "finished"
                                     final_map, t1_side, t2_side = session.get_final_map_and_sides()
@@ -869,20 +1012,21 @@ async def on_message(message: discord.Message):
                                         await message.channel.send(
                                             f"✅ Map-ban complete!\n"
                                             f"Final Map: **{final_map}**\n"
-                                            f"{session.team1.display_name}: **{t1_side}**\n"
-                                            f"{session.team2.display_name}: **{t2_side}**"
+                                            f"{team1.display_name}: **{t1_side}**\n"
+                                            f"{team2.display_name}: **{t2_side}**"
                                         )
                                     await send_session_status(message.channel, session, title="Final Map-Ban Result")
                                     await bot.process_commands(message)
                                     return
-                                else:
-                                    # Switch turn
-                                    session.current_turn = session.other_captain(message.author)
-                                    await message.channel.send(
-                                        f"Next ban: {session.current_turn.mention} – "
-                                        f"type `<map> <side>` (e.g. `2 axis`, `phl a`, `phl n axis`)."
-                                    )
-                                    await send_session_status(message.channel, session, title="Map Ban Updated")
+
+                                # Switch turn
+                                session.current_turn = session.other_captain(message.author)
+                                await message.channel.send(
+                                    f"Next ban: {session.current_turn.mention} – "
+                                    f"type `<map> <side>` (e.g. `2 axis`, `phl a`, `phl n axis`)."
+                                )
+
+                                await send_session_status(message.channel, session, title="Map Ban Updated")
 
     # Let normal commands run
     await bot.process_commands(message)
@@ -896,6 +1040,4 @@ if __name__ == "__main__":
     if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("Error: DISCORD_BOT_TOKEN not set. Put it in your .env file as DISCORD_BOT_TOKEN=YOUR_TOKEN")
     else:
-        print("Loaded token length:", len(TOKEN))
-        print("Token starts with (do NOT share this):", TOKEN[:10])
         bot.run(TOKEN)
